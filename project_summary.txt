@@ -1,0 +1,194 @@
+Project Summary: Ryu_insta_notify
+
+1) High-Level Overview
+- Project type: Python Discord bot.
+- Main purpose: Detect Instagram links in Discord messages and re-upload the corresponding video file in the same channel.
+- Primary workflow goal: Instagram link detection and video re-upload automation.
+
+What the bot does:
+- Listens to server messages.
+- Detects Instagram URLs.
+- Resolves URL to a direct media URL when possible (reel/post/tv).
+- Downloads media with yt-dlp.
+- Uploads the downloaded file to Discord.
+- Deletes the local downloaded file after sending.
+
+
+2) Project Architecture
+- Core runtime file: bot.py
+- Config/secrets file: .env (contains token and metadata; sensitive values must remain private)
+- Dependencies file: requirements.txt
+- Operational docs: README.md
+- VCS hygiene: .gitignore
+
+bot.py structure (top-to-bottom):
+- Imports and constants:
+  - Regex patterns for Instagram URL detection and ANSI escape cleanup.
+  - Download folder path.
+- Environment/bootstrap:
+  - Loads .env via python-dotenv.
+  - Reads DISCORD_TOKEN and validates it exists.
+  - Configures Discord intents (message_content enabled).
+  - Initializes commands.Bot and command sync flag.
+- URL and error utility functions:
+  - normalize_instagram_url
+  - is_supported_media_url
+  - resolve_instagram_media_url
+  - clean_error_text
+- Download helper functions:
+  - resolve_downloaded_file
+  - download_with_options
+  - download_instagram_video
+- Message/send pipeline:
+  - send_instagram_video
+- Discord event handlers:
+  - on_ready
+  - on_message
+- Slash command:
+  - /insta command for explicit URL-triggered downloads
+- Entrypoint:
+  - bot.run(DISCORD_TOKEN)
+
+Event flow:
+- on_message -> detect Instagram URL -> normalize/resolve URL -> download via yt-dlp -> send with discord.File -> delete local file.
+- Alternate flow: /insta slash command -> same download/send/delete pipeline.
+
+Libraries used:
+- discord.py: Discord gateway/events, message sending, slash commands.
+- yt-dlp: Instagram extraction and media download.
+- python-dotenv: Loads environment variables from .env.
+
+
+3) Component Breakdown
+A) Discord bot setup and intents
+- Uses commands.Bot with command prefix ! and default intents.
+- Enables message_content intent explicitly so text message scanning works.
+- on_ready syncs slash commands once per runtime.
+
+B) Message listener logic
+- on_message ignores bot-authored messages.
+- Searches incoming content with Instagram URL regex.
+- If URL found, passes it to shared send_instagram_video pipeline.
+- Calls bot.process_commands to preserve command handling.
+
+C) Instagram URL detection logic
+- Regex catches instagram.com links in free-form message text.
+- normalize_instagram_url removes query/fragment and standardizes trailing slash.
+- resolve_instagram_media_url attempts to convert non-direct/share links into direct media links.
+- Accepts direct media routes containing /reel/, /p/, or /tv/.
+
+D) yt-dlp integration and configuration
+- Primary options:
+  - format: bestvideo+bestaudio fallback chain with mp4 preference.
+  - outtmpl: downloads/%(id)s.%(ext)s
+  - noplaylist: true
+  - merge_output_format: mp4
+  - quiet/no_warnings: true
+- Retry path:
+  - If initial download fails and INSTAGRAM_COOKIES_FROM_BROWSER is set, retries with cookiesfrombrowser.
+
+E) File handling (download, send, delete)
+- Creates downloads directory if missing.
+- Resolves final output file from requested_downloads or prepared filename fallback.
+- Sends file using discord.File.
+- Deletes local file in finally block to prevent disk growth.
+
+
+4) Environment and Dependencies
+.env usage:
+- DISCORD_TOKEN: required for bot authentication.
+- Additional metadata currently present:
+  - CLIENT_ID
+  - BOT_INVITE_URL
+- Sensitive values are present in .env and should never be committed.
+
+requirements.txt dependencies:
+- discord.py
+- python-dotenv
+- yt-dlp
+
+Other relevant project files:
+- .gitignore currently ignores:
+  - .env
+  - venv/
+  - .venv/
+  - __pycache__/
+  - downloads/
+  - *.log
+
+
+5) Current Issues and Risks
+Known extractor/runtime issues:
+- yt-dlp Instagram extraction can fail for some links (especially profile-style links, expired share links, private/login-gated content, or Instagram extractor regressions).
+
+FFmpeg dependency risk:
+- Missing ffmpeg on host can break audio/video merge when yt-dlp downloads separate streams.
+- Current code requests bestvideo+bestaudio first, which may require ffmpeg to produce final mp4.
+
+Discord upload limit risk:
+- Large videos may exceed Discord upload limits (varies by server boost/Nitro level), causing send failure.
+
+Operational risks:
+- Blocking/slow downloads under heavy traffic can create queue delays (current implementation uses asyncio.to_thread but no central queue/rate control).
+- Minimal structured logging makes production debugging harder.
+- .env currently contains real secrets; accidental exposure risk exists if leaked outside repo controls.
+
+
+6) Improvement Recommendations
+A) Error handling improvements
+- Map known yt-dlp errors into user-friendly categories:
+  - invalid URL
+  - private/login required
+  - extraction changed/upstream breakage
+  - file too large
+- Add explicit timeout handling around download and upload.
+
+B) Retry mechanisms
+- Add bounded retries with short backoff for transient network/extractor failures.
+- Separate retries for:
+  - URL resolution stage
+  - actual media download stage
+
+C) Logging improvements
+- Add structured logs (timestamp, stage, URL hash/id, outcome).
+- Log key stages:
+  - detection
+  - normalization/resolution
+  - download start/end
+  - upload success/failure
+  - cleanup status
+
+D) File size handling
+- Pre-check expected file size from yt-dlp metadata (if available) before download/upload.
+- If oversized, send a clear message (file exceeds Discord limit) instead of generic failure.
+- Optionally add a lower-quality fallback profile to reduce output size.
+
+E) Better yt-dlp options
+- Consider explicit fallback format profiles for smaller files.
+- Add extractor args/cookie strategy documentation for private or region-restricted media.
+- Periodically update yt-dlp in deployment pipeline.
+
+F) Deployment hardening
+- Ensure ffmpeg is installed on deployment target (Render worker image or custom build step).
+- Add health/startup logs and optional watchdog/restart policy.
+
+
+7) Parsing-Friendly Snapshot (for another AI)
+System intent:
+- Input: Discord message or slash command containing Instagram URL.
+- Processing: URL detect -> canonicalize/resolve -> yt-dlp download -> file path resolve.
+- Output: Upload mp4 to Discord channel.
+- Cleanup: Remove local file.
+
+Primary entrypoints:
+- Event: on_message
+- Command: /insta
+
+Critical environment variables:
+- DISCORD_TOKEN (required)
+- INSTAGRAM_COOKIES_FROM_BROWSER (optional retry path)
+
+Core constraints:
+- Depends on external extractor stability (yt-dlp + Instagram site changes).
+- Upload size constrained by Discord limits.
+- ffmpeg availability may be required for merged media output.
